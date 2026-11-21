@@ -128,7 +128,28 @@ interface ComboData {
   combos: Combo[]
 }
 
+/** Pre-computed node positions (public/data/layout.json), keyed by card id. */
+interface LayoutData {
+  positions: Record<string, [number, number]>
+}
+
 const COMBOS_PER_PAGE = 20
+
+/**
+ * The layout simulation runs on the GPU and has to render to, and blend into, float textures.
+ * Many phone GPUs can't, and there the nodes would just sit where they were first scattered.
+ */
+function gpuCanSimulate(): boolean {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2')
+    if (!gl) return false
+    const supported = Boolean(gl.getExtension('EXT_color_buffer_float') && gl.getExtension('EXT_float_blend'))
+    gl.getExtension('WEBGL_lose_context')?.loseContext()
+    return supported
+  } catch {
+    return false
+  }
+}
 
 // --- Main ---
 async function main() {
@@ -169,6 +190,29 @@ async function main() {
     const updated = new Date(data.generatedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
     document.getElementById('data-updated')!.textContent = `Updated ${updated}.`
   }
+
+  // --- Layout mode ---
+  // Where the GPU can't run the simulation, nodes are pinned to a pre-computed layout instead.
+  // ?layout=static and ?layout=live force a mode. ?export-layout saves the settled positions
+  // as layout.json (put it in public/data/ after refreshing the card data).
+  const params = new URLSearchParams(location.search)
+  const exportLayout = params.has('export-layout')
+  const layoutParam = params.get('layout')
+  async function loadStaticLayout(): Promise<LayoutData['positions'] | null> {
+    try {
+      const res = await fetch(`${import.meta.env.BASE_URL}data/layout.json`)
+      if (!res.ok) return null
+      return ((await res.json()) as LayoutData).positions ?? null
+    } catch {
+      return null
+    }
+  }
+  // Positions the nodes are pinned to; null while the simulation does the layout
+  let staticLayout: LayoutData['positions'] | null = null
+  if (!exportLayout && (layoutParam === 'static' || (layoutParam !== 'live' && !gpuCanSimulate()))) {
+    staticLayout = await loadStaticLayout()
+  }
+  if (staticLayout) appEl.classList.add('static-layout')
 
   // Build lookup maps
   const cardById = new Map(data.nodes.map(n => [n.id, n]))
@@ -279,17 +323,29 @@ async function main() {
     const mainIndices = mainClusterIndices(nodes.length, links)
     const highlightDeck = deckCardIds !== null && deckMode === 'extension'
 
-    const points = nodes.map((n, i) => ({
-      id: n.id,
-      index: i,
-      label: shortName(n.name),
-      // Node color = the card's color identity from Scryfall
-      color: highlightDeck && deckCardIds!.has(n.id) ? DECK_HIGHLIGHT : identityToColor(n.colors),
-      // Both sizings ride along as columns, so switching the "Node size" option only swaps
-      // which column is drawn and leaves the layout alone
-      sizeLinks: Math.max(2, Math.min(20, 2 + 18 * Math.sqrt((degree.get(n.id) ?? 0) / maxDegree))),
-      sizeCmc: Math.max(2, Math.min(16, 2 + (n.cmc ?? 0))),
-    }))
+    // Middle of the saved layout, where cards it does not know are parked
+    const known = staticLayout ? Object.values(staticLayout) : []
+    const layoutCenter = known.length
+      ? [known.reduce((sum, p) => sum + p[0], 0) / known.length, known.reduce((sum, p) => sum + p[1], 0) / known.length]
+      : [0, 0]
+    const points = nodes.map((n, i) => {
+      // A card missing from the saved layout (data refreshed since) lands near the middle
+      const pinned = staticLayout?.[n.id] ?? [layoutCenter[0] + ((i * 37) % 60) - 30, layoutCenter[1] + ((i * 53) % 60) - 30]
+      return {
+        id: n.id,
+        index: i,
+        label: shortName(n.name),
+        // Node color = the card's color identity from Scryfall
+        color: highlightDeck && deckCardIds!.has(n.id) ? DECK_HIGHLIGHT : identityToColor(n.colors),
+        // Both sizings ride along as columns, so switching the "Node size" option only swaps
+        // which column is drawn and leaves the layout alone
+        sizeLinks: Math.max(2, Math.min(20, 2 + 18 * Math.sqrt((degree.get(n.id) ?? 0) / maxDegree))),
+        sizeCmc: Math.max(2, Math.min(16, 2 + (n.cmc ?? 0))),
+        // Only used when the layout is static (pointXBy / pointYBy)
+        layoutX: pinned[0],
+        layoutY: pinned[1],
+      }
+    })
 
     return { points, links, mainIndices, linkStyle }
   }
@@ -452,6 +508,7 @@ async function main() {
     onSimulationEnd: () => {
       if (!userMoved) fitGraph(600)
       updateFitZoom()
+      exportSettledLayout()
     },
   }
 
@@ -479,7 +536,10 @@ async function main() {
     linkWidthBy: 'width' as const,
     linkWidthStrategy: 'direct' as const,
 
-    enableSimulation: true,
+    // With a static layout the nodes sit at their saved x/y and nothing is simulated
+    enableSimulation: !staticLayout,
+    pointXBy: (staticLayout ? 'layoutX' : undefined) as string | undefined,
+    pointYBy: (staticLayout ? 'layoutY' : undefined) as string | undefined,
     enableDrag: true,
     selectPointOnClick: true,
     focusPointOnClick: true,
@@ -541,7 +601,62 @@ async function main() {
   // Reveal the graph once the data is in
   const hideLoading = () => loadingEl.classList.add('done')
   graph.dataUploaded().then(hideLoading, hideLoading)
+  graph.dataUploaded().then(() => window.setTimeout(fallBackIfStuck, 1500), () => {})
   scheduleAutoFit()
+
+  /**
+   * Safety net for devices that pass the GPU check but still don't move anything: if the
+   * simulation says it is running and no node has moved across two seconds of rendered frames,
+   * switch to the saved layout.
+   */
+  async function fallBackIfStuck() {
+    if (staticLayout || exportLayout || layoutParam === 'live') return
+    const sample = () => graph.getPointPositionsAsync().catch(() => undefined)
+    const before = await sample()
+    let frames = 0
+    let counting = true
+    const countFrame = () => {
+      frames++
+      if (counting) requestAnimationFrame(countFrame)
+    }
+    requestAnimationFrame(countFrame)
+    await new Promise(resolve => window.setTimeout(resolve, 2000))
+    counting = false
+    // A hidden tab renders nothing, and a layout that has already settled isn't stuck
+    if (frames < 20 || !graph.isSimulationRunning || staticLayout) return
+    const after = await sample()
+    let moved = false
+    if (before && after && before.length === after.length) {
+      for (let i = 0; i < after.length && !moved; i++) moved = Math.abs(after[i] - before[i]) > 0.01
+    }
+    if (moved) return
+    const layout = await loadStaticLayout()
+    if (!layout) return
+    staticLayout = layout
+    appEl.classList.add('static-layout')
+    baseConfig.enableSimulation = false
+    baseConfig.pointXBy = 'layoutX'
+    baseConfig.pointYBy = 'layoutY'
+    applyFilters() // rebuilds the graph, now pinned to the saved positions
+  }
+
+  // ?export-layout: once the layout has settled, hand back the positions as layout.json
+  let layoutExported = false
+  async function exportSettledLayout() {
+    if (!exportLayout || layoutExported || baseConfig.points.length !== data.nodes.length) return
+    const positions = await graph.getPointPositionsAsync()
+    if (!positions || positions.length < data.nodes.length * 2) return
+    layoutExported = true
+    const saved: LayoutData['positions'] = {}
+    const round = (value: number) => Math.round(value * 10) / 10
+    data.nodes.forEach((n, i) => { saved[n.id] = [round(positions[2 * i]), round(positions[2 * i + 1])] })
+    const json = JSON.stringify({ generatedAt: new Date().toISOString(), positions: saved })
+    ;(window as unknown as { exportedLayout?: string }).exportedLayout = json
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }))
+    link.download = 'layout.json'
+    link.click()
+  }
 
   // --- Simulation controls ---
   const pauseBtn = document.getElementById('pause-btn') as HTMLButtonElement

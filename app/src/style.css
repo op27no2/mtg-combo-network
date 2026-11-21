@@ -1326,3 +1326,10 @@ details.panel-section > summary:hover {
 .show-more {
   margin-top: 4px;
 }
+
+/* ---------- Static layout (GPU cannot run the simulation) ---------- */
+#app.static-layout #pause-btn,
+#app.static-layout #reheat-btn,
+#app.static-layout .setting-physics {
+  display: none;
+}
