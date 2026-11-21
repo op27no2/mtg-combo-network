@@ -1,0 +1,20 @@
+{
+  "name": "app",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && node scripts/deploy.mjs"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  },
+  "dependencies": {
+    "@cosmograph/cosmograph": "^2.6.0"
+  }
+}

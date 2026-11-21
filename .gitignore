@@ -1,0 +1,19 @@
+# Dependencies and build output
+node_modules/
+dist/
+
+# Local tooling settings
+.claude/
+.vscode/
+.idea/
+
+# Separate third-party checkout, not part of this project
+commander-spellbook-backend/
+
+# Logs, env files, OS clutter
+*.log
+.env
+.env.*
+*.local
+.DS_Store
+Thumbs.db
