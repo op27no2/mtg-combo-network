@@ -135,6 +135,31 @@ interface LayoutData {
 
 const COMBOS_PER_PAGE = 20
 
+/**
+ * Makes the layout simulation work on GPUs that take GLSL precision literally (ARM Mali, found
+ * in many Android phones).
+ *
+ * Cosmograph's engine keeps node positions in float textures, but most of its shaders declare
+ * their samplers without a precision, which in GLSL ES means "lowp". Desktop GPUs ignore that.
+ * Mali reads those textures as 16-bit floats, where a coordinate around 2000 can only change in
+ * steps of 1-2 units: each frame's small nudge is rounded away and the layout never moves, with
+ * no error anywhere. Declaring high precision for samplers and ints at the top of every shader
+ * fixes it. Must run before the graph compiles its shaders.
+ */
+function forceHighPrecisionShaders() {
+  if (typeof WebGL2RenderingContext === 'undefined') return
+  const proto = WebGL2RenderingContext.prototype
+  const shaderSource = proto.shaderSource
+  proto.shaderSource = function (this: WebGL2RenderingContext, shader: WebGLShader, source: string) {
+    const patched = source.replace(
+      /^(\s*#version 300 es[^\n]*\n)/,
+      '$1precision highp int;\nprecision highp sampler2D;\nprecision highp sampler2DArray;\n',
+    )
+    shaderSource.call(this, shader, patched)
+  }
+}
+forceHighPrecisionShaders()
+
 /** What this device's GPU offers for the float-texture work the layout simulation does. */
 function probeGpu() {
   const info = { webgl2: false, colorBufferFloat: false, floatBlend: false, halfFloat: false, maxTexture: 0, renderer: '' }
