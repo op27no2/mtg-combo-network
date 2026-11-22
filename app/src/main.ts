@@ -135,20 +135,34 @@ interface LayoutData {
 
 const COMBOS_PER_PAGE = 20
 
-/**
- * The layout simulation runs on the GPU and has to render to, and blend into, float textures.
- * Many phone GPUs can't, and there the nodes would just sit where they were first scattered.
- */
-function gpuCanSimulate(): boolean {
+/** What this device's GPU offers for the float-texture work the layout simulation does. */
+function probeGpu() {
+  const info = { webgl2: false, colorBufferFloat: false, floatBlend: false, halfFloat: false, maxTexture: 0, renderer: '' }
   try {
     const gl = document.createElement('canvas').getContext('webgl2')
-    if (!gl) return false
-    const supported = Boolean(gl.getExtension('EXT_color_buffer_float') && gl.getExtension('EXT_float_blend'))
+    if (!gl) return info
+    info.webgl2 = true
+    info.colorBufferFloat = Boolean(gl.getExtension('EXT_color_buffer_float'))
+    info.floatBlend = Boolean(gl.getExtension('EXT_float_blend'))
+    info.halfFloat = Boolean(gl.getExtension('EXT_color_buffer_half_float'))
+    info.maxTexture = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info')
+    info.renderer = String(gl.getParameter(dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER))
     gl.getExtension('WEBGL_lose_context')?.loseContext()
-    return supported
   } catch {
-    return false
+    // leave the defaults: treated as "can't simulate"
   }
+  return info
+}
+
+/**
+ * The layout simulation runs on the GPU and keeps node positions in float textures it renders
+ * to. Without that ability it cannot run at all. (Devices that have it but still don't move
+ * anything are caught after load by fallBackIfStuck.)
+ */
+function gpuCanSimulate(): boolean {
+  const gpu = probeGpu()
+  return gpu.webgl2 && gpu.colorBufferFloat
 }
 
 // --- Main ---
@@ -209,10 +223,22 @@ async function main() {
   }
   // Positions the nodes are pinned to; null while the simulation does the layout
   let staticLayout: LayoutData['positions'] | null = null
+  let layoutReason = 'live simulation' // shown by ?debug
   if (!exportLayout && (layoutParam === 'static' || (layoutParam !== 'live' && !gpuCanSimulate()))) {
     staticLayout = await loadStaticLayout()
+    layoutReason = staticLayout
+      ? (layoutParam === 'static' ? 'static (forced by URL)' : 'static (GPU cannot render to float textures)')
+      : 'live simulation (no saved layout found)'
   }
   if (staticLayout) appEl.classList.add('static-layout')
+
+  // ?debug: an on-screen readout for diagnosing a device we can't attach a console to
+  const debugLines: string[] = []
+  const debugOn = params.has('debug')
+  if (debugOn) {
+    window.addEventListener('error', e => debugLines.push(`error: ${String(e.message).slice(0, 90)}`))
+    window.addEventListener('unhandledrejection', e => debugLines.push(`rejection: ${String(e.reason).slice(0, 90)}`))
+  }
 
   // Build lookup maps
   const cardById = new Map(data.nodes.map(n => [n.id, n]))
@@ -633,11 +659,69 @@ async function main() {
     const layout = await loadStaticLayout()
     if (!layout) return
     staticLayout = layout
+    layoutReason = 'static (simulation ran but nothing moved)'
     appEl.classList.add('static-layout')
     baseConfig.enableSimulation = false
     baseConfig.pointXBy = 'layoutX'
     baseConfig.pointYBy = 'layoutY'
     applyFilters() // rebuilds the graph, now pinned to the saved positions
+  }
+
+  if (debugOn) {
+    const panel = document.createElement('pre')
+    panel.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9999;margin:0;padding:8px 10px;max-height:55vh;overflow:auto;'
+      + 'background:rgba(0,0,0,.88);color:#9f9;font:11px/1.45 monospace;white-space:pre-wrap;pointer-events:none'
+    document.body.appendChild(panel)
+    const gpu = probeGpu()
+    const started = performance.now()
+    let uploadedAt = 0
+    graph.dataUploaded().then(() => { uploadedAt = performance.now() }, () => { debugLines.push('data upload failed') })
+    let frames = 0
+    const countFrame = () => { frames++; requestAnimationFrame(countFrame) }
+    requestAnimationFrame(countFrame)
+    const canvas = () => container.querySelector('canvas')
+    let contextLost = 0
+    let lostHooked = false
+    const glErrors = new Set<string>()
+    let previous: Float32Array | undefined
+    let movement = 'n/a'
+    window.setInterval(async () => {
+      const c = canvas()
+      if (c && !lostHooked) {
+        lostHooked = true
+        c.addEventListener('webglcontextlost', () => { contextLost++ })
+      }
+      const gl = c?.getContext('webgl2')
+      if (gl) {
+        const code = gl.getError()
+        if (code !== gl.NO_ERROR) glErrors.add(`0x${code.toString(16)}`)
+      }
+      try {
+        const now = await graph.getPointPositionsAsync()
+        if (now && previous && now.length === previous.length) {
+          let max = 0
+          for (let i = 0; i < now.length; i++) max = Math.max(max, Math.abs(now[i] - previous[i]))
+          movement = `${max.toFixed(2)} units in the last second`
+        } else if (!now) {
+          movement = 'position readback returned nothing'
+        }
+        previous = now ? new Float32Array(now) : undefined
+      } catch (e) {
+        movement = `position readback failed: ${String(e).slice(0, 60)}`
+      }
+      panel.textContent = [
+        `layout: ${layoutReason}`,
+        `simulation running: ${graph.isSimulationRunning} | progress: ${graph.progress ?? 'n/a'}`,
+        `node movement: ${movement}`,
+        `frames: ${frames} | points: ${baseConfig.points.length} | canvas: ${c ? `${c.width}x${c.height}` : 'none'} | dpr ${window.devicePixelRatio}`,
+        `webgl2: ${gpu.webgl2} | float render: ${gpu.colorBufferFloat} | float blend: ${gpu.floatBlend} | half float: ${gpu.halfFloat} | max texture: ${gpu.maxTexture}`,
+        `gpu: ${gpu.renderer}`,
+        `gl errors: ${glErrors.size ? [...glErrors].join(' ') : 'none'} | context lost: ${contextLost}`,
+        `data uploaded after: ${uploadedAt ? `${((uploadedAt - started) / 1000).toFixed(1)}s` : 'not yet'}`,
+        `ua: ${navigator.userAgent.slice(0, 120)}`,
+        ...debugLines.slice(0, 5),
+      ].join('\n')
+    }, 1000)
   }
 
   // ?export-layout: once the layout has settled, hand back the positions as layout.json
