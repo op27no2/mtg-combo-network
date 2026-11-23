@@ -289,7 +289,7 @@ async function main() {
 
   // --- Deck import state ---
   let deckCardIds: Set<string> | null = null
-  let deckMode: 'internal' | 'extension' = 'internal'
+  let deckMode: 'internal' | 'extension' = 'extension'
   let deckColors = ''
   const DECK_HIGHLIGHT = '#00e5ff'
 
