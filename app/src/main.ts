@@ -214,10 +214,22 @@ async function main() {
   // --- Load data ---
   let data: ComboData
   try {
+    // The data is split in two so each file stays under static hosts' per-file size limits:
+    // graph.json has the cards and links, combos.json the combo details.
     // BASE_URL keeps this working when the site is served from a sub-path
-    const res = await fetch(`${import.meta.env.BASE_URL}data/combos.json`)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    data = await res.json()
+    const load = async <T>(file: string, cache: RequestCache): Promise<T> => {
+      const res = await fetch(`${import.meta.env.BASE_URL}data/${file}`, { cache })
+      if (!res.ok) throw new Error(`${file}: HTTP ${res.status}`)
+      return res.json()
+    }
+    type GraphFile = Pick<ComboData, 'generatedAt' | 'nodes' | 'links'>
+    type CombosFile = Pick<ComboData, 'generatedAt' | 'combos'>
+    const loadBoth = (cache: RequestCache) =>
+      Promise.all([load<GraphFile>('graph.json', cache), load<CombosFile>('combos.json', cache)])
+    let [graphFile, combosFile] = await loadBoth('default')
+    // Right after a data refresh a browser can hold one old file and one new one; they must match
+    if (graphFile.generatedAt !== combosFile.generatedAt) [graphFile, combosFile] = await loadBoth('reload')
+    data = { ...graphFile, combos: combosFile.combos }
   } catch (e) {
     console.error('Failed to load combo data', e)
     loadingEl.classList.add('error')

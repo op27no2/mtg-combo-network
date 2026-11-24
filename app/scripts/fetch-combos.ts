@@ -3,11 +3,12 @@
  *   1. EDHREC JSON API (top 100 per color identity - has popularity/deck counts)
  *   2. Commander Spellbook API (full dataset - paginated)
  *
- * Merges and deduplicates into a single graph-ready JSON file.
+ * Merges and deduplicates into two graph-ready JSON files (split so each stays under
+ * static hosts' per-file size limits): graph.json (cards + links) and combos.json (combo details).
  *
  * Run: npx tsx scripts/fetch-combos.ts
  *
- * Patch the existing combos.json without refetching every combo (re-runs Scryfall
+ * Patch the existing data files without refetching every combo (re-runs Scryfall
  * enrichment, fills in missing combo descriptions, re-dedupes). Safe to re-run; it resumes:
  *      npx tsx scripts/fetch-combos.ts --enrich-only
  */
@@ -17,7 +18,9 @@ import path from "node:path";
 import zlib from "node:zlib";
 
 const ENRICH_ONLY = process.argv.includes("--enrich-only");
-const OUT_PATH = path.resolve(import.meta.dirname, "../public/data/combos.json");
+const DATA_DIR = path.resolve(import.meta.dirname, "../public/data");
+const GRAPH_PATH = path.join(DATA_DIR, "graph.json");   // cards + links
+const COMBOS_PATH = path.join(DATA_DIR, "combos.json"); // combo details
 
 // Spellbook has 100k+ variants sorted by popularity (EDHREC deck count) desc; the long
 // tail is mostly 0-5 decks. Stop paginating once a whole page falls below this floor.
@@ -421,10 +424,11 @@ async function enrichWithSpellbook() {
 // -- Load previous output (for --enrich-only) --
 
 function loadExisting() {
-  console.log(`=== Loading existing data from ${OUT_PATH} ===`);
-  const prev = JSON.parse(fs.readFileSync(OUT_PATH, "utf8"));
-  for (const n of prev.nodes) cards.set(n.id, { legal: [], ...n });
-  for (const c of prev.combos) combos.set(c.id, c);
+  console.log(`=== Loading existing data from ${DATA_DIR} ===`);
+  const prevGraph = JSON.parse(fs.readFileSync(GRAPH_PATH, "utf8"));
+  const prevCombos = JSON.parse(fs.readFileSync(COMBOS_PATH, "utf8"));
+  for (const n of prevGraph.nodes) cards.set(n.id, { legal: [], ...n });
+  for (const c of prevCombos.combos) combos.set(c.id, c);
   // Links are rebuilt from combos in deduplicateByName()
   console.log(`  ${cards.size} cards, ${combos.size} combos`);
 }
@@ -453,11 +457,15 @@ async function main() {
   const described = output.combos.filter(c => c.description).length;
   console.log(`\nFinal: ${output.nodes.length} cards, ${output.combos.length} combos (${described} with descriptions), ${output.links.length} links`);
 
-  // Write to a temp file first so a crash mid-write can't leave a truncated combos.json
-  const tmpPath = OUT_PATH + ".tmp";
-  fs.writeFileSync(tmpPath, JSON.stringify(output));
-  fs.renameSync(tmpPath, OUT_PATH);
-  console.log(`Written to ${OUT_PATH}`);
+  // Both files carry the same generatedAt; the app uses it to check they belong together.
+  // Write to temp files first so a crash mid-write can't leave a truncated data file.
+  const files: [string, object][] = [
+    [GRAPH_PATH, { generatedAt: output.generatedAt, nodes: output.nodes, links: output.links }],
+    [COMBOS_PATH, { generatedAt: output.generatedAt, combos: output.combos }],
+  ];
+  for (const [file, content] of files) fs.writeFileSync(file + ".tmp", JSON.stringify(content));
+  for (const [file] of files) fs.renameSync(file + ".tmp", file);
+  console.log(`Written to ${GRAPH_PATH} and ${COMBOS_PATH}`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
