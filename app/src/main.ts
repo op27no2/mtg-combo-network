@@ -1250,6 +1250,8 @@ async function main() {
   /** Opens a card's details and highlights it (and its combo partners) in the graph. */
   async function focusCard(cardId: string) {
     showCardInfo(cardId)
+    // Opening the card pane resizes the canvas; let that land so the view is framed for the new size
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     const indices = await graph.getPointIndicesByIds([cardId])
     if (indices && indices.length > 0 && Number.isInteger(indices[0])) {
       graph.selectPoint(indices[0], false, true)
@@ -1290,45 +1292,103 @@ async function main() {
       return
     }
 
-    if (target.closest('.card-close')) {
-      graph.unselectAllPoints()
-      graph.setFocusedPoint(undefined)
-      showDefaultInfo()
-    }
+    // Closing the pane keeps the highlight in the graph; clicking empty canvas clears it
+    if (target.closest('.card-close')) showDefaultInfo()
   })
 
   // --- Search ---
+  // Typing highlights every matching card in the graph and lists the best matches under the
+  // search box; picking one from the list (or pressing Enter) opens that card.
+  const searchResultsEl = document.getElementById('search-results')!
+  const MAX_SUGGESTIONS = 8
+  let suggestions: CardNode[] = []
+  let activeSuggestion = 0
+
+  /** Cards whose name contains the query: exact matches first, then names starting with it, then the most combos. */
   function searchMatches(): CardNode[] {
     const query = searchEl.value.trim().toLowerCase()
     if (!query) return []
+    const rank = (card: CardNode) => {
+      const name = card.name.toLowerCase()
+      if (name === query || shortName(card.name).toLowerCase() === query) return 0
+      if (name.startsWith(query)) return 1
+      return name.includes(` ${query}`) ? 2 : 3
+    }
+    const comboCount = (card: CardNode) => combosByCard.get(card.id)?.length ?? 0
     return data.nodes
       .filter(n => n.name.toLowerCase().includes(query))
-      .slice(0, 50)
+      .sort((a, b) => rank(a) - rank(b) || comboCount(b) - comboCount(a) || a.name.localeCompare(b.name))
   }
 
-  searchEl.addEventListener('input', async () => {
+  function renderSuggestions() {
+    searchResultsEl.hidden = suggestions.length === 0
+    searchResultsEl.innerHTML = suggestions.map((card, i) => {
+      const count = combosByCard.get(card.id)?.length ?? 0
+      return `<li role="option" data-card-id="${esc(card.id)}" aria-selected="${i === activeSuggestion}">
+        ${swatch(identityToColor(card.colors))}
+        <span class="result-name">${esc(card.name)}</span>
+        <span class="result-count">${count.toLocaleString()} combo${count !== 1 ? 's' : ''}</span>
+      </li>`
+    }).join('')
+  }
+
+  function closeSuggestions() {
+    suggestions = []
+    renderSuggestions()
+  }
+
+  function pickSuggestion(card: CardNode) {
+    searchEl.value = card.name
+    closeSuggestions()
+    searchEl.blur() // puts a phone's keyboard away so the graph is visible
+    focusCard(card.id)
+  }
+
+  async function runSearch() {
     const matches = searchMatches()
+    suggestions = matches.slice(0, MAX_SUGGESTIONS)
+    activeSuggestion = 0
+    renderSuggestions()
     if (matches.length === 0) {
       graph.unselectAllPoints()
       return
     }
-    const indices = await graph.getPointIndicesByIds(matches.map(m => m.id))
+    const ids = matches.slice(0, 50).map(m => m.id)
+    const indices = await graph.getPointIndicesByIds(ids)
     if (indices && indices.length > 0) {
       graph.selectPoints(indices)
-      frameCards(matches.map(m => m.id))
+      frameCards(ids)
     }
+  }
+
+  searchEl.addEventListener('input', runSearch)
+  searchEl.addEventListener('focus', () => {
+    if (searchEl.value.trim() && suggestions.length === 0) runSearch()
+  })
+  // The delay lets a tap on a result register before the list goes away
+  searchEl.addEventListener('blur', () => setTimeout(closeSuggestions, 150))
+
+  // Keep focus in the search box while a result is being pressed
+  searchResultsEl.addEventListener('mousedown', event => event.preventDefault())
+  searchResultsEl.addEventListener('click', (event) => {
+    const item = (event.target as HTMLElement).closest<HTMLElement>('li[data-card-id]')
+    const card = item && cardById.get(item.dataset.cardId!)
+    if (card) pickSuggestion(card)
   })
 
   searchEl.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      // Open the exact match if there is one, otherwise the first result
-      const matches = searchMatches()
-      const query = searchEl.value.trim().toLowerCase()
-      const best = matches.find(m => m.name.toLowerCase() === query || shortName(m.name).toLowerCase() === query) ?? matches[0]
-      if (best) focusCard(best.id)
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (suggestions.length === 0) return
+      event.preventDefault()
+      const step = event.key === 'ArrowDown' ? 1 : -1
+      activeSuggestion = (activeSuggestion + step + suggestions.length) % suggestions.length
+      renderSuggestions()
+    } else if (event.key === 'Enter') {
+      const best = suggestions[activeSuggestion] ?? searchMatches()[0]
+      if (best) pickSuggestion(best)
     } else if (event.key === 'Escape') {
       searchEl.value = ''
-      searchEl.dispatchEvent(new Event('input'))
+      runSearch()
       searchEl.blur()
     }
   })
