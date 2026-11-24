@@ -419,6 +419,39 @@ async function main() {
 
   const container = document.getElementById('graph-container')!
 
+  // --- Touch gestures ---
+  // A finger that lands on a node would drag that node instead of panning or pinching, and in
+  // the dense middle of the graph nearly every touch lands on one. So on touch screens nodes
+  // can't be dragged: one finger pans, two fingers zoom, a tap opens a card.
+  const touchScreen = window.matchMedia('(pointer: coarse)').matches
+  // A pan or pinch can still end in a stray "click" when a finger lifts; swallow it before the
+  // graph sees it, so only a real tap selects a card.
+  const TAP_SLOP = 10 // px a finger may wander and still count as a tap
+  let touchStart: [number, number] | null = null
+  let touchWasGesture = false
+  let ignoreClicksUntil = 0
+  container.addEventListener('touchstart', (event) => {
+    if (event.touches.length === 1) {
+      touchStart = [event.touches[0].clientX, event.touches[0].clientY]
+      touchWasGesture = false
+    } else {
+      touchWasGesture = true
+    }
+  }, { capture: true, passive: true })
+  container.addEventListener('touchmove', (event) => {
+    const touch = event.touches[0]
+    if (touchStart && Math.hypot(touch.clientX - touchStart[0], touch.clientY - touchStart[1]) > TAP_SLOP) touchWasGesture = true
+  }, { capture: true, passive: true })
+  const endTouch = (event: TouchEvent) => {
+    if (touchWasGesture) ignoreClicksUntil = performance.now() + 500
+    if (event.touches.length === 0) touchStart = null
+  }
+  container.addEventListener('touchend', endTouch, { capture: true, passive: true })
+  container.addEventListener('touchcancel', endTouch, { capture: true, passive: true })
+  container.addEventListener('click', (event) => {
+    if (performance.now() < ignoreClicksUntil) event.stopPropagation()
+  }, { capture: true })
+
   // What "fit view" frames: the main cluster when there is one, otherwise everything
   let fitIndices = initialGraph.mainIndices
   function fitGraph(duration: number) {
@@ -603,7 +636,7 @@ async function main() {
     enableSimulation: !staticLayout,
     pointXBy: (staticLayout ? 'layoutX' : undefined) as string | undefined,
     pointYBy: (staticLayout ? 'layoutY' : undefined) as string | undefined,
-    enableDrag: true,
+    enableDrag: !touchScreen,
     selectPointOnClick: true,
     focusPointOnClick: true,
     // Gravity is the only force anchoring the layout to the center. Too weak (it used to be 0.05)
@@ -803,6 +836,16 @@ async function main() {
     fitGraph(400)
     updateFitZoom()
   })
+
+  const ZOOM_BUTTON_STEP = 1.6
+  const zoomBy = (factor: number) => {
+    const zoom = graph.getZoomLevel()
+    if (!zoom) return
+    userMoved = true // the user chose this view; don't auto-fit over it
+    graph.setZoomLevel(zoom * factor, 250)
+  }
+  document.getElementById('zoom-in-btn')!.addEventListener('click', () => zoomBy(ZOOM_BUTTON_STEP))
+  document.getElementById('zoom-out-btn')!.addEventListener('click', () => zoomBy(1 / ZOOM_BUTTON_STEP))
 
   // Paint the filled part of single-thumb sliders
   function paintSlider(input: HTMLInputElement) {

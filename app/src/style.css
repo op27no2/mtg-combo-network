@@ -859,6 +859,18 @@ details.panel-section > summary:hover {
   transition: background 0.15s, color 0.15s;
 }
 
+#graph-toolbar button.icon-only {
+  width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+
+#graph-toolbar .toolbar-sep {
+  width: 1px;
+  margin: 5px 2px;
+  background: var(--border-hi);
+}
+
 #graph-toolbar button:hover {
   background: var(--surface-hi);
   color: var(--gold-hi);
