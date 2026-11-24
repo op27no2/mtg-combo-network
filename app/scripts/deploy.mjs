@@ -27,7 +27,9 @@ writeFileSync(path.join(dist, '.nojekyll'), '') // serve the files as they are, 
 const scratchRepo = path.join(dist, '.git')
 rmSync(scratchRepo, { recursive: true, force: true })
 try {
-  git('init -q -b gh-pages', dist)
+  // `git init -b` needs Git 2.28+, so name the branch in a separate step
+  git('init -q', dist)
+  git('symbolic-ref HEAD refs/heads/gh-pages', dist)
   git('add -A', dist)
   git(`-c user.name="${name}" -c user.email="${email}" commit -q -m "Deploy ${source}"`, dist)
   execSync(`git push -f "${remote}" gh-pages`, { cwd: dist, stdio: 'inherit' })
